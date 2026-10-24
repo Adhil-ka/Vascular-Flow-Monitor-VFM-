@@ -62,11 +62,13 @@ const elements = {
   calibrateHint: $('calibrate-hint'),
   calibrationTrack: $('calibration-track'),
   calibrationStatus: $('calibration-status'),
-  calibrationPath: $('calibration-path'),
   calibrationProgress: $('calibration-progress'),
   baselineBadge: $('baseline-badge'),
   baselineSummary: $('baseline-summary'),
+  calibrationCollapsed: $('calibration-collapsed'),
   calibrationCard: $('calibration-card'),
+
+  prototypeNotice: $('prototype-notice'),
 
   vitalsRoot: $('vitals-root'),  scopeCanvas: $('scope-canvas'),
   scopeTooltip: $('scope-tooltip'),
@@ -260,25 +262,29 @@ function uid() {
 // Calibration
 // ─────────────────────────────────────────────────────────────────────────────
 
-let calibrationLength = 0;
-
 /**
- * Build an ECG-style trace for the calibration progress track.
+ * Build an ECG-style trace for the calibration progress track, sized in real
+ * pixels so one SVG unit equals one CSS pixel.
  *
- * Generated rather than inlined: it keeps the markup readable, and the fill path
- * shares the base path's geometry exactly so the overlay lands on the line.
- * An early revision used a plain high-frequency sine, which read as a comb.
+ * An earlier revision used a fixed 1000x26 viewBox with preserveAspectRatio="none".
+ * That stretches the trace by whatever ratio the container happens to be —
+ * measured at 4.98:1 on a 390px phone — which squashed the R-spikes into
+ * unreadable slivers and made the whole thing read as a jagged scribble.
+ * Generating at the container's own size keeps the waveform proportional
+ * everywhere and lets the beat count follow the width, so a beat stays roughly
+ * the same physical size on a phone as on a desktop.
  */
-function buildScribbleGeometry() {
-  const width = 1000;
-  const mid = 13;
-  const amp = 8.5;
-  const beat = 100;
+function buildScribbleGeometry(width, height) {
+  const targetBeat = 86;
+  const beats = Math.max(2, Math.round(width / targetBeat));
+  const beat = width / beats;
+  const mid = height / 2;
+  const amp = height * 0.36;
   const step = 2;
 
   const wave = (t) => {
     const ramp = (a, b) => Math.max(0, Math.min(1, (t - a) / (b - a)));
-    const bump = (a, b, height) => Math.sin(Math.PI * ramp(a, b)) * height;
+    const bump = (a, b, scale) => Math.sin(Math.PI * ramp(a, b)) * scale;
     return (
       bump(0.3, 0.42, 0.16) + // P
       bump(0.55, 0.6, -0.2) + // Q
@@ -290,24 +296,29 @@ function buildScribbleGeometry() {
 
   const points = [];
   for (let x = 0; x <= width; x += step) {
-    const y = mid - wave((x % beat) / beat) * amp;
-    points.push(`${x.toFixed(1)} ${y.toFixed(2)}`);
+    const phase = ((((x % beat) + beat) % beat) / beat);
+    points.push(`${x.toFixed(1)} ${(mid - wave(phase) * amp).toFixed(2)}`);
   }
   return `M${points.join(' L')}`;
 }
 
-function measureCalibrationPath() {
-  if (!elements.calibrationPath) return;
-  const d = buildScribbleGeometry();
-  for (const path of document.querySelectorAll('.scribble-base, .scribble-fill')) {
-    path.setAttribute('d', d);
+/**
+ * Regenerate the trace at the container's current pixel size. Runs on boot and
+ * on every box change, because the geometry is expressed in pixels and would
+ * otherwise drift from the element it is drawn in.
+ */
+function layoutScribble() {
+  const stack = elements.calibrationTrack?.querySelector('.scribble-stack');
+  if (!stack) return;
+  const box = stack.getBoundingClientRect();
+  if (box.width < 2 || box.height < 2) return;
+
+  const viewBox = `0 0 ${Math.round(box.width)} ${Math.round(box.height)}`;
+  const d = buildScribbleGeometry(box.width, box.height);
+  for (const layer of stack.querySelectorAll('.scribble-layer')) {
+    layer.setAttribute('viewBox', viewBox);
+    layer.firstElementChild?.setAttribute('d', d);
   }
-  try {
-    calibrationLength = elements.calibrationPath.getTotalLength();
-  } catch {
-    calibrationLength = 1000;
-  }
-  elements.calibrationPath.style.setProperty('--path-length', String(calibrationLength));
 }
 
 function renderCalibration() {
@@ -334,10 +345,8 @@ function renderCalibration() {
     elements.calibrateBtn.textContent = 'Recalibrate';
     elements.calibrateBtn.disabled = false;
     elements.calibrationTrack.setAttribute('aria-valuetext', `Baseline learned from ${baseline.sampleCount} readings`);
-    if (elements.calibrationPath && calibrationLength) {
-      elements.calibrationPath.style.setProperty('--path-progress', String(progress));
-      elements.calibrationProgress.textContent = `${baseline.sampleCount} samples`;
-    }
+    elements.calibrationTrack.style.setProperty('--progress', '100%');
+    elements.calibrationProgress.textContent = `${baseline.sampleCount} samples`;
     renderBaselineSummary();
     return;
   }
@@ -351,10 +360,8 @@ function renderCalibration() {
     elements.calibrateBtn.textContent = 'Calibrating…';
     elements.calibrateBtn.disabled = true;
     elements.calibrationTrack.setAttribute('aria-valuetext', `${collected} of ${goal} readings collected`);
-    if (elements.calibrationPath && calibrationLength) {
-      elements.calibrationPath.style.setProperty('--path-progress', String(ratio));
-      elements.calibrationProgress.textContent = `${Math.round(ratio * 100)}%`;
-    }
+    elements.calibrationTrack.style.setProperty('--progress', `${(ratio * 100).toFixed(1)}%`);
+    elements.calibrationProgress.textContent = `${Math.round(ratio * 100)}%`;
     return;
   }
 
@@ -369,16 +376,15 @@ function renderCalibration() {
   elements.calibrateBtn.textContent = 'Start calibration';
   elements.calibrateBtn.disabled = state.connection !== 'connected' && !state.simulator;
   elements.calibrationTrack.setAttribute('aria-valuetext', 'Not started');
-  if (elements.calibrationPath && calibrationLength) {
-    elements.calibrationPath.style.setProperty('--path-progress', '0');
-    elements.calibrationProgress.textContent = '0%';
-  }
+  elements.calibrationTrack.style.setProperty('--progress', '0%');
+  elements.calibrationProgress.textContent = '0%';
   elements.baselineSummary.textContent = '';
 }
 
 function renderBaselineSummary() {
   if (!state.baseline) {
     elements.baselineSummary.textContent = '';
+    elements.calibrationCollapsed.textContent = '';
     return;
   }
   const b = state.baseline;
@@ -391,6 +397,15 @@ function renderBaselineSummary() {
   if (b.bpm != null) parts.push(`HR ${Math.round(b.bpm)} bpm`);
   if (b.perfusionIndex != null) parts.push(`PI ${formatFixed(b.perfusionIndex, 1)}%`);
   elements.baselineSummary.textContent = parts.join(' · ');
+
+  // One-line replacement for the collapsed card on narrow screens. Built as
+  // text nodes rather than innerHTML; the only markup is the <b> that carries
+  // the sample count.
+  elements.calibrationCollapsed.replaceChildren(
+    document.createTextNode('Learned from '),
+    Object.assign(document.createElement('b'), { textContent: `${b.sampleCount} readings` }),
+    document.createTextNode(`. Threshold ${formatFixed(b.thresholdRatio, 3)}.`)
+  );
 }
 
 async function beginCalibration() {
@@ -886,6 +901,10 @@ async function startDemo(scenario) {
       // Replay goes through the real encoder and decoder, not around them.
       ingestPacket(parseTelemetry(makeFrame(packet)), 'demo');
     } catch (error) {
+      // Keep the bad frame out of the pipeline, but make the failure loud. A
+      // render error swallowed into the event log leaves stale readouts on
+      // screen with no visible cause.
+      console.error('[VFM] Replay frame error', error);
       addEvent(`Replay frame error: ${error.message}`, 'alert');
     }
   }, 1000);
@@ -1029,7 +1048,7 @@ async function restore() {
   }
 
   renderEvents();
-  measureCalibrationPath();
+  layoutScribble();
   renderCalibration();
   renderAll();
   scrambleNow(elements.stateLabel, 'Ready to connect');
@@ -1061,6 +1080,23 @@ function startClock() {
 // Wiring
 elements.connectBtn.addEventListener('click', toggleConnection);
 elements.calibrateBtn.addEventListener('click', beginCalibration);
+
+// The prototype boundary is always available but should not permanently occupy
+// the top of a phone screen above the readouts.
+elements.prototypeNotice.querySelector('.notice-more')?.addEventListener('click', (event) => {
+  const notice = elements.prototypeNotice;
+  const expanded = notice.dataset.collapsed === 'false';
+  notice.dataset.collapsed = String(expanded);
+  const button = event.currentTarget;
+  button.setAttribute('aria-expanded', String(!expanded));
+  button.querySelector('.visually-hidden').textContent = expanded
+    ? 'Show the full prototype boundary'
+    : 'Hide the full prototype boundary';
+});
+
+// The prototype boundary now sits at the foot of the Monitor view as a collapsed
+// footnote, so it starts collapsed regardless of calibration state.
+elements.prototypeNotice.dataset.collapsed = 'true';
 elements.themeToggle.addEventListener('click', () => {
   const next = theme.toggle();
   toast(`${next === 'dark' ? 'Dark' : 'Light'} theme.`);
@@ -1089,6 +1125,19 @@ theme.onChange(() => {
   scope.refresh();
   signals.refresh();
 });
+
+// The calibration trace is generated in pixels, so it has to be rebuilt whenever
+// its box changes — a rotation, a resize, or the mobile/tablet layout switch.
+const scribbleStack = elements.calibrationTrack?.querySelector('.scribble-stack');
+if (scribbleStack && 'ResizeObserver' in window) {
+  let scribbleWidth = 0;
+  new ResizeObserver((entries) => {
+    const width = entries[0]?.contentRect.width ?? 0;
+    if (Math.abs(width - scribbleWidth) < 1) return;
+    scribbleWidth = width;
+    layoutScribble();
+  }).observe(scribbleStack);
+}
 
 startClock();
 restore();

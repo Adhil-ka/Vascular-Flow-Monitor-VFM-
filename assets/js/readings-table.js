@@ -20,9 +20,35 @@ import {
   qualityBand
 } from './format.js';
 import { OPTICAL } from './engine.js';
+import { motion } from './theme.js';
 
 const PAGE_SIZE = 50;
 const SPARK_WINDOW = 12;
+
+/**
+ * Incremental row animation.
+ *
+ * The table used to rebuild every row on every reading, which tore down and
+ * recreated all fifty <tr> elements once a second — the whole log visibly
+ * flashed and snapped back. Rows are now keyed by reading identity and reused:
+ * a new reading gets an enter animation, the rows beneath it slide down via
+ * FLIP, and untouched rows are never touched at all.
+ *
+ * FLIP is applied only when the change is a pure insertion. Re-sorting or
+ * changing the filter is a different intent — animating fifty rows across a
+ * reorder is noise, and it made the new-reading cue indistinguishable from
+ * ordinary interaction.
+ */
+const ENTER_MS = 360;
+const SLIDE_MS = 420;
+/** Slightly springier than the app's standard ease-out, for the downward shift. */
+const SLIDE_EASE = 'cubic-bezier(0.22, 0.94, 0.2, 1)';
+const STAGGER_MS = 16;
+/** How long the "new reading" highlight lingers after the row arrives.
+    Kept well under the 1s arrival interval. With a longer flash the highlight
+    is still lit when the next reading lands, so there is no dark gap and a
+    permanently lit row stops reading as "new" — it just looks enabled. */
+const FLASH_MS = 600;
 
 const COLUMNS = [
   { key: 'time', label: 'Time', hint: 'Local time of the reading', sort: (r) => r.timestamp, align: 'start' },
@@ -73,6 +99,11 @@ export function createReadingsTable({ root, onInspect, onInspectEnd }) {
   let page = 0;
   let following = true;
   let unseen = 0;
+  /** Rows currently in the DOM, keyed by reading identity, so they can be reused. */
+  const mounted = new Map();
+  /** Pending highlight-removal timers, keyed by row. */
+  const freshTimers = new Map();
+  let lastConfigKey = null;
 
   // ── Shell ────────────────────────────────────────────────────────────────
   const toolbar = el('div', 'rt-toolbar');
@@ -333,7 +364,8 @@ export function createReadingsTable({ root, onInspect, onInspectEnd }) {
     const indexCell = el('td', 'rt-index');
     indexCell.dataset.label = '#';
     indexCell.dataset.align = 'end';
-    indexCell.append(el('span', 'num num-faint', String(index)));
+    const indexSpan = el('span', 'num num-faint', String(index));
+    indexCell.append(indexSpan);
     row.append(indexCell);
 
     const timeCell = el('td');
@@ -354,7 +386,8 @@ export function createReadingsTable({ root, onInspect, onInspectEnd }) {
     row.append(numCell('Δ from base', formatPercent(reading.deltaPercent), reading.anomalous ? 'alert' : deltaTone));
 
     row.append(spo2Cell(reading));
-    row.append(hrCell(reading, sparkValues));
+    const pulseCell = hrCell(reading, sparkValues);
+    row.append(pulseCell);
     row.append(
       isNullish(reading.perfusionIndex)
         ? dashCell('PI', 'No perfusion index reported by the band.')
@@ -370,7 +403,20 @@ export function createReadingsTable({ root, onInspect, onInspectEnd }) {
     row.addEventListener('pointerenter', () => onInspect?.(reading));
     row.addEventListener('focusin', () => onInspect?.(reading));
     row.addEventListener('pointerleave', () => onInspectEnd?.());
-    return row;
+
+    return { row, indexSpan, pulseCell, reading };
+  }
+
+  /**
+   * A reading is immutable once stored, so a reused row only needs its two
+   * position-dependent parts refreshed: the row number, and the pulse sparkline
+   * whose trailing window slides forward with each new reading.
+   */
+  function updateRow(rec, sparkValues, index) {
+    rec.indexSpan.textContent = String(index);
+    const fresh = hrCell(rec.reading, sparkValues);
+    rec.row.replaceChild(fresh, rec.pulseCell);
+    rec.pulseCell = fresh;
   }
 
   // ── Render ───────────────────────────────────────────────────────────────
@@ -394,13 +440,92 @@ export function createReadingsTable({ root, onInspect, onInspectEnd }) {
     const chrono = [...all].sort((a, b) => a.timestamp - b.timestamp);
     const chronoIndex = new Map(chrono.map((reading, index) => [rowKey(reading), index]));
 
+    /* Reconcile against the mounted rows instead of rebuilding the body.
+       FLIP runs only for a pure insertion (same filter, sort and page) — that is
+       the one case where "the log moved" is meaningful feedback rather than noise. */
+    // Reordering goes through a fragment so the body is touched once.
     const rows = document.createDocumentFragment();
+    const configKey = `${filterKey}|${sortKey}|${sortDirection}|${page}|${start}`;
+    const structural = configKey !== lastConfigKey;
+
+    const previousTops = new Map();
+    if (!structural) {
+      for (const [key, rec] of mounted) {
+        if (rec.row.isConnected) previousTops.set(key, rec.row.getBoundingClientRect().top);
+      }
+    }
+
+    const ordered = [];
+    const entering = [];
     slice.forEach((reading, offset) => {
-      const position = chronoIndex.get(rowKey(reading)) ?? 0;
+      const key = rowKey(reading);
+      const position = chronoIndex.get(key) ?? 0;
       const window = chrono.slice(Math.max(0, position - SPARK_WINDOW + 1), position + 1);
-      rows.append(buildRow(reading, window, start + offset + 1));
+      const existing = mounted.get(key);
+      if (existing) {
+        updateRow(existing, window, start + offset + 1);
+        ordered.push(existing.row);
+      } else {
+        const rec = buildRow(reading, window, start + offset + 1);
+        mounted.set(key, rec);
+        ordered.push(rec.row);
+        entering.push(rec.row);
+      }
     });
+
+    // Retire rows that fell out of the slice (page change, filter, prune).
+    const keep = new Set(ordered);
+    for (const [key, rec] of mounted) {
+      if (!keep.has(rec.row)) {
+        clearTimeout(freshTimers.get(rec.row));
+        freshTimers.delete(rec.row);
+        rec.row.remove();
+        mounted.delete(key);
+      }
+    }
+
+    // append() moves an already-parented node, so this reorders in place.
+    rows.append(...ordered);
     tbody.replaceChildren(rows);
+
+    if (!structural && !motion.reduced) {
+      // Stagger the shift so a long move reads as a wave following the new row
+      // rather than the whole block shifting as one rigid piece. Capped so a
+      // long list never feels like it is loading.
+      ordered.forEach((row, index) => {
+        const was = previousTops.get(row.dataset.key);
+        if (was == null) return;
+        const now = row.getBoundingClientRect().top;
+        const shift = was - now;
+        if (Math.abs(shift) < 1) return;
+        row.animate(
+          [{ transform: `translateY(${shift}px)` }, { transform: 'translateY(0)' }],
+          {
+            duration: SLIDE_MS,
+            easing: SLIDE_EASE,
+            delay: Math.min(index, 10) * STAGGER_MS
+          }
+        );
+      });
+
+      for (const row of entering) {
+        row.animate(
+          [
+            { opacity: 0, transform: 'translateY(-14px) scale(0.985)', offset: 0 },
+            { opacity: 1, transform: 'translateY(0) scale(1)', offset: 1 }
+          ],
+          { duration: ENTER_MS, easing: 'cubic-bezier(0.22, 0.9, 0.24, 1)' }
+        );
+
+        /* A row that merely fades in is easy to miss — the eye is usually
+           somewhere else in a 50-row log. The flash is the part that actually
+           draws attention: it outlives the entrance and still reads as "this one
+           is new" a second later. */
+        row.classList.add('is-fresh');
+        freshTimers.set(row, setTimeout(() => row.classList.remove('is-fresh'), FLASH_MS + 80));
+      }
+    }
+    lastConfigKey = configKey;
 
     const hasRows = sorted.length > 0;
     scroll.hidden = !hasRows;

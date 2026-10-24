@@ -102,6 +102,10 @@ export function createTheme({ onChange } = {}) {
     }
     root.dataset.theme = theme;
     current = theme;
+    // Keep the browser chrome in step with the app. Without this the OS status
+    // bar and any installed-PWA title bar stay dark in light mode.
+    const themeColorMeta = document.querySelector('meta[name="theme-color"]');
+    if (themeColorMeta) themeColorMeta.setAttribute('content', palette.canvas);
     try { localStorage.setItem(STORAGE_KEY, theme); } catch { /* private mode */ }
     for (const listener of listeners) listener(theme);
   }

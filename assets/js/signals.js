@@ -108,8 +108,9 @@ export function createSignals({ root }) {
   const freqHead = el('div', 'freq-head');
   freqHead.append(freqValue, freqUnit);
   const freqSpark = el('div', 'freq-spark');
+  const freqRange = el('p', 'freq-range', 'collecting…');
   const freqNote = el('p', 'note', 'A sustained upward shift in dominant frequency accompanies a rising flow ratio.');
-  frequency.body.append(freqHead, freqSpark, freqNote);
+  frequency.body.append(freqHead, freqSpark, freqRange, freqNote);
 
   root.replaceChildren(acoustic.section, optical.section, device.section, frequency.section);
 
@@ -239,6 +240,19 @@ export function createSignals({ root }) {
           height: 34
         })
       );
+
+      /* A dominant frequency that is holding steady draws a perfectly flat
+         line, which reads as a broken chart rather than as the good news it is.
+         State the spread explicitly instead of leaving the shape to speak. */
+      if (freqValues.length >= 2) {
+        const min = Math.min(...freqValues);
+        const max = Math.max(...freqValues);
+        const spread = max - min;
+        freqRange.textContent =
+          spread === 0 ? `holding steady at ${max} Hz` : `${min}–${max} Hz · spread ${spread} Hz`;
+      } else {
+        freqRange.textContent = 'collecting…';
+      }
       // Quality note doubles as the placement guidance when the signal is poor.
       if (latest && Number.isFinite(latest.quality) && latest.quality < QUALITY_MINIMUM) {
         spectralNote.textContent = `Signal quality is ${latest.quality} of 100, below the ${QUALITY_MINIMUM}-point admission floor. Reposition the band over the access site and hold still; these readings are not used as evidence.`;

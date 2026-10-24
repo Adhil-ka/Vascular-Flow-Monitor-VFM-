@@ -14,18 +14,21 @@
 import { el, formatCountdown, formatPercent, formatFixed } from './format.js';
 import { motion } from './theme.js';
 
+// `primary` fields span the full row on narrow screens, so the three numbers
+// that matter most stay on one readable line instead of pairing up arbitrarily.
 const EVIDENCE_FIELDS = [
   { key: 'ratio', label: 'Flow ratio', format: (e) => formatFixed(e.ratio, 3) },
   { key: 'baseline', label: 'Personal baseline', format: (e) => formatFixed(e.baseline, 3) },
   { key: 'ratioDelta', label: 'Change from baseline', format: (e) => formatPercent(e.ratioDelta) },
-  { key: 'spo2', label: 'SpO₂', format: (e) => (Number.isFinite(e.spo2) ? `${e.spo2}%` : 'not reported') },
-  { key: 'bpm', label: 'Heart rate', format: (e) => (Number.isFinite(e.bpm) ? `${e.bpm} bpm` : 'not reported') },
-  { key: 'perfusionIndex', label: 'Perfusion index', format: (e) => (Number.isFinite(e.perfusionIndex) ? `${e.perfusionIndex}%` : 'not reported') },
+  { key: 'spo2', label: 'SpO₂', format: (e) => (Number.isFinite(e.spo2) ? `${e.spo2}%` : 'not reported'), primary: true },
+  { key: 'bpm', label: 'Heart rate', format: (e) => (Number.isFinite(e.bpm) ? `${e.bpm} bpm` : 'not reported'), primary: true },
+  { key: 'perfusionIndex', label: 'Perfusion index', format: (e) => (Number.isFinite(e.perfusionIndex) ? `${e.perfusionIndex}%` : 'not reported'), primary: true },
   { key: 'amplitudeDelta', label: 'Amplitude change', format: (e) => formatPercent(e.amplitudeDelta) },
   { key: 'dominantFrequencyHz', label: 'Dominant frequency', format: (e) => (Number.isFinite(e.dominantFrequencyHz) ? `${e.dominantFrequencyHz} Hz` : 'not reported') }
 ];
 
 export function createAlertCenter({ dialog, onAcknowledge, onReposition }) {
+  const body = dialog.querySelector('.alert-scroll');
   const evidence = dialog.querySelector('[data-alert-evidence]');
   const evidenceTable = dialog.querySelector('[data-alert-table]');
   const headline = dialog.querySelector('[data-alert-headline]');
@@ -46,6 +49,13 @@ export function createAlertCenter({ dialog, onAcknowledge, onReposition }) {
   acknowledgeButton.addEventListener('click', () => onAcknowledge?.());
   repositionButton.addEventListener('click', () => onReposition?.());
 
+  // Rotating the phone changes whether the evidence list overflows.
+  if ('ResizeObserver' in window) {
+    new ResizeObserver(syncScrollAffordance).observe(dialog);
+  } else {
+    window.addEventListener('resize', syncScrollAffordance);
+  }
+
   dialog.addEventListener('cancel', (event) => {
     // A pending acknowledgement must be resolved deliberately, not by Escape.
     if (current) event.preventDefault();
@@ -64,6 +74,7 @@ export function createAlertCenter({ dialog, onAcknowledge, onReposition }) {
       const value = field.format(payload || {});
       if (value === 'not reported' || value === '—') continue;
       const row = el('div', 'evidence-row');
+      if (field.primary) row.classList.add('is-primary');
       row.append(el('span', 'evidence-key', field.label));
       const strong = el('strong', 'evidence-value', value);
       if (field.key === 'ratioDelta' && payload?.isAnomalous) strong.dataset.tone = 'alert';
@@ -72,6 +83,16 @@ export function createAlertCenter({ dialog, onAcknowledge, onReposition }) {
       rows.push(row);
     }
     evidenceTable.replaceChildren(...rows);
+  }
+
+  /**
+   * Fade the foot of the scroll area only while its content actually overflows.
+   * Measured rather than assumed: the dialog's height depends on viewport height,
+   * so the same alert overflows in landscape and fits in portrait.
+   */
+  function syncScrollAffordance() {
+    const overflowing = body.scrollHeight - body.clientHeight > 4;
+    body.classList.toggle('is-scrollable', overflowing);
   }
 
   function renderReasons(list) {
@@ -108,6 +129,7 @@ export function createAlertCenter({ dialog, onAcknowledge, onReposition }) {
       live.textContent = alert.state === 'ESCALATED' ? 'Alert escalated.' : 'Alert raised. Acknowledgement timer started.';
 
       if (!dialog.open && dialog.showModal) dialog.showModal();
+      syncScrollAffordance();
       // Restart the sonar rings on every open.
       if (!motion.reduced) {
         dialog.classList.remove('is-pinged');

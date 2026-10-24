@@ -1,14 +1,38 @@
 /**
  * Event seismograph.
  *
- * A compact strip showing recent system activity: one spike per event, height and
- * colour by severity. It gives the event log a shape you can read at a glance,
- * rather than a flat list of timestamps.
+ * A strip-chart of recent system activity on a real time axis. An earlier
+ * revision spaced events evenly by index, which made a burst of alerts and an
+ * hour of quiet look identical — the gaps, which are the whole point of a
+ * timeline, were erased. Events are now placed by timestamp across a rolling
+ * window, so a quiet stretch reads as empty track and a burst reads as a cluster.
+ *
+ * Severity drives stem height and colour; recency drives horizontal position.
  */
 
-const HEIGHT = 68;
-const PADDING = 6;
-const WEIGHT = { neutral: 0.22, good: 0.4, nominal: 0.4, watch: 0.68, alert: 1 };
+const HEIGHT = 76;
+const PADDING = 10;
+const WEIGHT = { neutral: 0.2, good: 0.38, nominal: 0.38, watch: 0.66, alert: 1 };
+/** Candidate window widths, in minutes. */
+const WINDOW_STEPS = [1, 2, 5, 10, 20];
+
+/**
+ * Pick the narrowest window that still contains every event.
+ *
+ * A fixed 20-minute window is honest but useless in practice: during a demo or
+ * a short session every event lands inside the last minute and the whole strip
+ * collapses into a sliver at the right edge. Choosing the smallest fitting step
+ * spreads the marks across the full width and keeps the axis labels meaningful.
+ */
+function chooseWindow(list, now) {
+  let oldest = 0;
+  for (const event of list) {
+    const age = now - event.timestamp;
+    if (age >= 0 && age > oldest) oldest = age;
+  }
+  const step = WINDOW_STEPS.find((minutes) => oldest <= minutes * 60_000 * 0.9) ?? 20;
+  return { ms: step * 60_000, minutes: step };
+}
 
 function token(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim();
@@ -32,45 +56,107 @@ export function createSeismograph({ canvas, capacity = 20 } = {}) {
     if (!box.width || !box.height) return;
     context.clearRect(0, 0, box.width, box.height);
 
-    const floor = box.height - PADDING;
+    const mono = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    const floor = box.height - PADDING - 12;
+    const ceiling = PADDING + 4;
+    const reach = floor - ceiling;
+    const width = box.width;
+
+    // The rail events rise from. Drawn even when nothing is plotted, so an
+    // empty strip reads as "no activity yet" rather than a broken chart.
     context.strokeStyle = token('grid');
     context.lineWidth = 1;
     context.beginPath();
     context.moveTo(0, Math.round(floor) + 0.5);
-    context.lineTo(box.width, Math.round(floor) + 0.5);
+    context.lineTo(width, Math.round(floor) + 0.5);
     context.stroke();
 
+    context.font = mono;
+    context.textBaseline = 'top';
+    context.fillStyle = token('muted');
+
     if (!events.length) {
-      context.fillStyle = token('muted');
-      context.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
       context.textAlign = 'center';
-      context.textBaseline = 'middle';
-      context.fillText('No activity recorded', box.width / 2, box.height / 2);
+      context.fillText('No activity recorded', width / 2, ceiling + reach / 2);
       return;
     }
 
-    const shown = events.slice(-capacity);
-    const slot = box.width / Math.max(shown.length, 1);
-    const barWidth = Math.max(3, Math.min(14, slot * 0.42));
-    const reach = floor - PADDING;
+    const now = Date.now();
+    const { ms: windowMs, minutes: windowMinutes } = chooseWindow(events, now);
+    const start = now - windowMs;
 
-    shown.forEach((event, index) => {
+    // Midpoint and "now" gridlines, so the strip is readable without
+    // cross-referencing the list underneath.
+    const marks = windowMinutes <= 1 ? [0.5, 0] : [windowMinutes, 0];
+    context.textAlign = 'left';
+    marks.forEach((minutes) => {
+      const x = width - (minutes / windowMinutes) * width;
+      context.strokeStyle = token('grid');
+      context.globalAlpha = minutes === 0 ? 0.9 : 0.5;
+      context.beginPath();
+      context.moveTo(Math.round(x) + 0.5, ceiling - 4);
+      context.lineTo(Math.round(x) + 0.5, floor);
+      context.stroke();
+      context.globalAlpha = 1;
+      const label = minutes === 0 ? 'now' : minutes < 1 ? `${Math.round(minutes * 60)}s` : `${minutes}m`;
+      context.fillText(label, Math.min(x + 4, width - 24), floor + 4);
+    });
+
+    const visible = events.filter((event) => event.timestamp >= start && event.timestamp <= now + 1000);
+
+    for (const event of visible) {
+      const age = Math.max(0, now - event.timestamp);
+      const x = width - (age / windowMs) * width;
+      if (x < -2 || x > width + 2) continue;
+
       const weight = WEIGHT[event.tone] ?? WEIGHT.neutral;
-      const x = index * slot + slot / 2;
-      const height = Math.max(3, reach * weight);
-      const tone =
-        event.tone === 'alert' ? 'alert' : event.tone === 'watch' ? 'watch' : event.tone === 'good' || event.tone === 'nominal' ? 'nominal' : 'line-strong';
+      const height = Math.max(4, reach * weight);
+      const isAlert = event.tone === 'alert';
+      const colour =
+        event.tone === 'alert'
+          ? token('alert')
+          : event.tone === 'watch'
+            ? token('watch')
+            : event.tone === 'good' || event.tone === 'nominal'
+              ? token('nominal')
+              : token('muted');
+
+      // Fade with age so recency reads as a channel beyond position alone.
+      const freshness = 1 - Math.min(1, age / windowMs);
+      context.globalAlpha = 0.3 + freshness * 0.7;
 
       context.save();
-      if (event.tone === 'alert') {
+      if (isAlert) {
         context.shadowColor = token('alert');
-        context.shadowBlur = 9;
+        context.shadowBlur = 10;
       }
-      context.fillStyle = tone === 'line-strong' ? token('muted') : token(tone);
-      context.globalAlpha = 0.45 + weight * 0.55;
-      context.fillRect(Math.round(x - barWidth / 2), Math.round(floor - height), Math.round(barWidth), Math.round(height));
+      context.strokeStyle = colour;
+      context.lineWidth = 2;
+      context.lineCap = 'round';
+      context.beginPath();
+      context.moveTo(Math.round(x) + 0.5, floor);
+      context.lineTo(Math.round(x) + 0.5, floor - height);
+      context.stroke();
       context.restore();
-    });
+
+      // A cap reads as an event marker rather than a bar chart column.
+      context.fillStyle = colour;
+      context.beginPath();
+      context.arc(x, floor - height, isAlert ? 3.2 : 2.2, 0, Math.PI * 2);
+      context.fill();
+    }
+
+    context.globalAlpha = 1;
+
+    if (!visible.length) {
+      context.textAlign = 'center';
+      context.fillStyle = token('muted');
+      context.fillText(
+        windowMinutes < 1 ? 'Nothing in the last minute' : `Nothing in the last ${windowMinutes} minutes`,
+        width / 2,
+        ceiling + reach / 2 - 6
+      );
+    }
   }
 
   const observer = new ResizeObserver(() => {
@@ -82,6 +168,10 @@ export function createSeismograph({ canvas, capacity = 20 } = {}) {
   const paletteObserver = new MutationObserver(() => render());
   paletteObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
+  // The strip is on a time axis, so it has to keep moving between events —
+  // otherwise marks sit frozen at the position they held when they arrived.
+  const ticker = setInterval(render, 30_000);
+
   return {
     setData(next) {
       events = next || [];
@@ -92,6 +182,7 @@ export function createSeismograph({ canvas, capacity = 20 } = {}) {
     destroy() {
       observer.disconnect();
       paletteObserver.disconnect();
+      clearInterval(ticker);
     }
   };
 }

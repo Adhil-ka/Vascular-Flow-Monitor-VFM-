@@ -330,9 +330,22 @@ export function createScope({ canvas, tooltip, onHover } = {}) {
     render();
   }
 
+  /* On a touch device the finger goes away on lift, but the pointer does not
+     generate a matching leave event, so the tooltip would stay pinned to
+     whatever was last touched until the next tap elsewhere. */
+  function handleUp(event) {
+    if (event.pointerType === 'mouse') return;
+    if (hovered == null) return;
+    hovered = null;
+    render();
+    onHover?.(null);
+  }
+
   canvas.addEventListener('pointermove', handleMove);
   canvas.addEventListener('pointerdown', handleClick);
   canvas.addEventListener('pointerleave', handleLeave);
+  canvas.addEventListener('pointerup', handleUp);
+  canvas.addEventListener('pointercancel', handleUp);
 
   const observer = new ResizeObserver(() => {
     measure();

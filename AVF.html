@@ -21,7 +21,7 @@
           <svg viewBox="0 0 32 32" focusable="false"><path d="M4 18h5l2.5-8 4 14 3-9 2 3h7.5" /></svg>
         </span>
         <span class="brand-text">
-          <strong>Vascular Flow Monitor</strong>
+          <strong><span class="brand-full">Vascular Flow Monitor</span><span class="brand-short">VFM</span></strong>
           <small>Personalized vascular-access change detection</small>
         </span>
       </div>
@@ -34,7 +34,10 @@
           <span id="theme-label" class="visually-hidden">Dark</span>
         </button>
         <button id="profileBtn" class="icon-btn" type="button" aria-expanded="false" aria-label="Monitoring profile">
-          <span aria-hidden="true">◍</span>
+          <svg class="icon-btn-glyph-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="12" cy="8" r="4" />
+            <path d="M4.5 20a7.5 7.5 0 0 1 15 0" />
+          </svg>
         </button>
         <button id="connectBtn" class="btn btn-primary" type="button" data-phase="">
           <span>Connect band</span>
@@ -44,24 +47,38 @@
 
     <!-- ── Primary navigation ──────────────────────────────────────────── -->
     <nav id="primary-nav" class="nav" aria-label="Primary">
+      <!-- Inline SVG rather than glyph characters: geometric symbols like ◈ ▤ ⌁
+           fall back to different system fonts across platforms and render at
+           inconsistent sizes and weights. These inherit stroke and colour. -->
       <a class="nav-item is-active" data-nav="monitor" href="#/monitor">
-        <span class="nav-glyph" aria-hidden="true">◈</span>
+        <svg class="nav-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M3 12h4l2.5-6 4 13 3-9 1.5 2h3" />
+        </svg>
         <span class="nav-label">Monitor</span>
       </a>
       <a class="nav-item" data-nav="readings" href="#/readings">
-        <span class="nav-glyph" aria-hidden="true">▤</span>
+        <svg class="nav-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M3 9h18M9 9v11" />
+        </svg>
         <span class="nav-label">Readings</span>
       </a>
       <a class="nav-item" data-nav="signals" href="#/signals">
-        <span class="nav-glyph" aria-hidden="true">∿</span>
+        <svg class="nav-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M2 12c2.5 0 2.5-7 5-7s2.5 14 5 14 2.5-11 5-11 2.5 4 5 4" />
+        </svg>
         <span class="nav-label">Signals</span>
       </a>
       <a class="nav-item" data-nav="events" href="#/events">
-        <span class="nav-glyph" aria-hidden="true">⌁</span>
+        <svg class="nav-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M4 18h4l2-9 3 13 2.5-8 1.5 4H20" />
+        </svg>
         <span class="nav-label">Events</span>
       </a>
       <a class="nav-item" data-nav="demo" href="#/demo">
-        <span class="nav-glyph" aria-hidden="true">▶</span>
+        <svg class="nav-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M7 4.5 19 12 7 19.5z" />
+        </svg>
         <span class="nav-label">Demo</span>
       </a>
       <p class="nav-legend">
@@ -82,11 +99,6 @@
             </div>
             <p class="view-sub">Status, primary readouts, and the flow-pattern trace.</p>
           </div>
-
-          <p class="notice">
-            <span aria-hidden="true">◆</span>
-            <strong>Prototype boundary.</strong> VFM compares readings against your own baseline and verifies a change before raising an alert. It does not diagnose a condition, replace clinical advice, or contact emergency services.
-          </p>
 
           <!-- Status strip -->
           <section class="status-strip" aria-labelledby="status-heading">
@@ -130,13 +142,28 @@
 
             <p id="calibrate-hint" class="note">A personal calibration needs 60 quality-checked readings.</p>
 
+            <!-- Collapsed to a single summary line on narrow screens once a baseline
+                 exists. The calibration detail is 337px tall and sat above the live
+                 readouts, pushing them below the fold on a 390px phone. -->
+            <div class="calibration-detail" id="calibration-detail">
             <div class="scribble" role="progressbar" id="calibration-track" aria-label="Calibration progress" aria-valuemin="0" aria-valuemax="60" aria-valuenow="0">
-              <!-- The trace is an ECG-style waveform generated in JS; both paths
-                   share one geometry so the fill overlays the base exactly. -->
-              <svg class="scribble-svg" viewBox="0 0 1000 26" preserveAspectRatio="none" aria-hidden="true" focusable="false">
-                <path class="scribble-base" d=""></path>
-                <path id="calibration-path" class="scribble-fill" d=""></path>
-              </svg>
+              <!-- Two stacked layers over one generated geometry. The fill layer is
+                   revealed with a CSS gradient mask rather than stroke-dashoffset:
+                   dash lengths are consumed in screen space under
+                   `vector-effect: non-scaling-stroke`, so they cannot be derived from
+                   getTotalLength(). A gradient stop is a plain percentage of the
+                   element box, so it is exact at every viewport and needs no
+                   remeasuring on resize. The geometry itself is regenerated at the
+                   container's pixel size, which keeps 1 SVG unit = 1px and so keeps
+                   the waveform's proportions intact on a narrow phone. -->
+              <span class="scribble-stack">
+                <svg class="scribble-layer" aria-hidden="true" focusable="false">
+                  <path class="scribble-base" d=""></path>
+                </svg>
+                <svg class="scribble-layer scribble-reveal" aria-hidden="true" focusable="false">
+                  <path id="calibration-path" class="scribble-fill" d=""></path>
+                </svg>
+              </span>
               <span id="calibration-progress" class="scribble-count">0%</span>
             </div>
 
@@ -145,6 +172,10 @@
               <button id="calibrate-btn" class="btn btn-secondary" type="button" disabled>Start calibration</button>
             </div>
             <p id="baseline-summary" class="baseline-summary"></p>
+            </div>
+
+            <!-- Shown only in the collapsed state; the detail block above is hidden then. -->
+            <p id="calibration-collapsed" class="calibration-collapsed" hidden></p>
           </section>
 
           <!-- Vitals -->
@@ -176,6 +207,17 @@
               <span class="note-hint">Hover to inspect · click to pin</span>
             </p>
           </section>
+
+          <!-- Sits last and stays collapsed to one line. It is a permanent
+               qualifier on the whole screen, not live data, so it should never
+               compete with the readouts for the top of the fold. -->
+          <p class="notice notice-foot" id="prototype-notice" data-collapsed="true">
+            <span class="notice-body">
+              <span aria-hidden="true">◆</span>
+              <strong>Prototype.</strong> Not a diagnostic device.<span class="notice-rest"> VFM compares readings against your own baseline and verifies a change across a second check before raising an alert. It does not diagnose a condition, replace clinical advice, or contact emergency services.</span>
+              <button class="notice-more" type="button" aria-expanded="false" aria-controls="prototype-notice"><span class="visually-hidden">Show the full prototype boundary</span></button>
+            </span>
+          </p>
         </section>
 
         <!-- ══ READINGS ════════════════════════════════════════════════ -->
@@ -249,7 +291,9 @@
           <h2 id="profile-heading" class="card-title">Monitoring profile</h2>
         </div>
         <button id="profile-close" class="icon-btn" type="button" aria-label="Close profile">
-          <span aria-hidden="true">✕</span>
+          <svg class="icon-btn-glyph-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
         </button>
       </div>
       <form id="profile-form" class="profile-form">
@@ -273,36 +317,40 @@
   <!-- ── Escalation dialog ─────────────────────────────────────────────── -->
   <dialog id="alert-dialog" class="alert" data-state="pending" aria-labelledby="alert-heading">
     <div class="alert-ping" aria-hidden="true"><i></i><i></i><i></i></div>
-    <div class="alert-icon" aria-hidden="true">!</div>
-    <p class="eyebrow alert-eyebrow">VFM needs your attention</p>
-    <h2 id="alert-heading" data-alert-headline>A flow-pattern change persisted</h2>
-    <p data-alert-summary class="alert-summary">VFM verified this change across a second check. Nothing has been sent anywhere.</p>
+    <!-- Everything above the actions scrolls; the actions themselves sit outside
+         it so the primary choice is reachable at any viewport size or orientation. -->
+    <div class="alert-scroll">
+      <div class="alert-icon" aria-hidden="true">!</div>
+      <p class="eyebrow alert-eyebrow">VFM needs your attention</p>
+      <h2 id="alert-heading" data-alert-headline>A flow-pattern change persisted</h2>
+      <p data-alert-summary class="alert-summary">VFM verified this change across a second check. Nothing has been sent anywhere.</p>
 
-    <ul data-alert-reasons class="alert-reasons" hidden></ul>
+      <ul data-alert-reasons class="alert-reasons" hidden></ul>
 
-    <div class="alert-clock">
-      <svg class="alert-ring" viewBox="0 0 120 120" aria-hidden="true" focusable="false">
-        <circle class="alert-ring-track" cx="60" cy="60" r="52" />
-        <circle data-alert-ring class="alert-ring-value" cx="60" cy="60" r="52" />
-      </svg>
-      <div class="alert-clock-copy">
-        <span class="alert-clock-label">Acknowledgement window</span>
-        <strong data-alert-countdown class="alert-clock-value">05:00</strong>
+      <div class="alert-clock">
+        <svg class="alert-ring" viewBox="0 0 120 120" aria-hidden="true" focusable="false">
+          <circle class="alert-ring-track" cx="60" cy="60" r="52" />
+          <circle data-alert-ring class="alert-ring-value" cx="60" cy="60" r="52" />
+        </svg>
+        <div class="alert-clock-copy">
+          <span class="alert-clock-label">Acknowledgement window</span>
+          <strong data-alert-countdown class="alert-clock-value">05:00</strong>
+        </div>
       </div>
+
+      <p data-alert-evidence class="note note-sm">These values came from a connected band.</p>
+
+      <div class="alert-evidence">
+        <p class="eyebrow">Evidence</p>
+        <div data-alert-table class="evidence-table"></div>
+      </div>
+
+      <p class="alert-note">
+        This prototype can simulate a clinic-delivery receipt. It does not contact emergency services, and it does not diagnose anything.
+      </p>
+
+      <p data-alert-live class="visually-hidden" role="status" aria-live="polite"></p>
     </div>
-
-    <p data-alert-evidence class="note note-sm">These values came from a connected band.</p>
-
-    <div class="alert-evidence">
-      <p class="eyebrow">Evidence</p>
-      <div data-alert-table class="evidence-table"></div>
-    </div>
-
-    <p class="alert-note">
-      This prototype can simulate a clinic-delivery receipt. It does not contact emergency services, and it does not diagnose anything.
-    </p>
-
-    <p data-alert-live class="visually-hidden" role="status" aria-live="polite"></p>
 
     <div class="alert-actions">
       <button data-alert-ack class="btn btn-primary" type="button">I’m safe — acknowledge</button>
