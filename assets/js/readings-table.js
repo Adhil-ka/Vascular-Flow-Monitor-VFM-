@@ -427,9 +427,11 @@ export function createReadingsTable({ root, onInspect, onInspectEnd }) {
     const filtered = all.filter(filter.match);
 
     const column = COLUMNS.find((c) => c.key === sortKey) ?? COLUMNS[0];
-    const sorted = [...filtered].sort((a, b) => compare(a, b, column.sort, sortDirection));
-    // Stable secondary ordering keeps equal values from shuffling between renders.
-    sorted.sort((a, b) => compare(a, b, COLUMNS[0].sort, 'desc'));
+    // Sort by the chosen column *last*: Array.sort is stable, so a later sort by
+    // timestamp would otherwise become the primary key and make every column
+    // header except Time a no-op. Time-first also keeps ties in arrival order.
+    const sorted = [...filtered].sort((a, b) => compare(a, b, COLUMNS[0].sort, 'desc'));
+    sorted.sort((a, b) => compare(a, b, column.sort, sortDirection));
 
     const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
     if (page > pageCount - 1) page = pageCount - 1;

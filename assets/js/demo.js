@@ -65,7 +65,7 @@ export function nextPacket(scenario, tick, { warmingUp = false } = {}) {
   let quality = 94;
   let bpm = 74 + Math.round(jitter(4));
   let spo2 = 97 + jitter(0.9);
-  let perfusionIndex = 15 + jitter(1.6);
+  let perfusionIndex = 3.6 + jitter(0.4);
   let flags = FLAG.CONTACT | FLAG.PPG_VALID | FLAG.HAPTIC;
 
   if (!warmingUp) {
@@ -89,7 +89,7 @@ export function nextPacket(scenario, tick, { warmingUp = false } = {}) {
       amplitude = 0.84 - 0.12 * ramp + noise;
       dominantFrequencyHz = 150 + Math.round(335 * ramp);
       quality = 92 + Math.round(jitter(3));
-      perfusionIndex = Math.max(3, 15 - 9 * ramp + jitter(1));
+      perfusionIndex = Math.max(0.5, 3.6 - 3.0 * ramp + jitter(0.3));
       spo2 = Math.max(90, 97 - 4 * ramp + jitter(0.7));
       bpm = Math.round(74 + 16 * ramp + jitter(4));
     }

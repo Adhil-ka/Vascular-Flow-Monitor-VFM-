@@ -1,5 +1,7 @@
 /** Shared formatting. Every measured value renders through here. */
 
+import { OPTICAL } from './engine.js';
+
 const clockFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
 const clockSecondsFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 const dateTimeFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -71,8 +73,8 @@ export function spo2Band(spo2) {
 
 export function perfusionBand(pi) {
   if (!Number.isFinite(pi)) return { label: 'No signal', tone: 'neutral' };
-  if (pi >= 8) return { label: 'Strong', tone: 'nominal' };
-  if (pi >= 4) return { label: 'Fair', tone: 'watch' };
+  if (pi >= OPTICAL.perfusionIndex.fairBelow) return { label: 'Strong', tone: 'nominal' };
+  if (pi >= OPTICAL.perfusionIndex.poorBelow) return { label: 'Fair', tone: 'watch' };
   return { label: 'Weak', tone: 'alert' };
 }
 

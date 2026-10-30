@@ -125,9 +125,28 @@ const state = {
   alertTimer: null,
   recheckTimer: null,
   clockTimer: null,
+  signalTimer: null,
   lastPacketAt: 0,
   lastGoodPacketAt: 0
 };
+
+/**
+ * How long a reading stays on screen as "current". A band that is connected but
+ * producing unusable frames must not leave a healthy-looking readout frozen on
+ * the Monitor view, so anything older than this is presented as stale instead.
+ */
+const SIGNAL_STALE_MS = 4000;
+/** A calibration that stops producing admissible readings is abandoned. */
+const CALIBRATION_TIMEOUT_MS = 12_000;
+
+/** True while a source is attached and therefore expected to produce readings. */
+function expectingReadings() {
+  return Boolean(state.simulator) || state.connection === 'connected';
+}
+
+function signalIsStale(now = Date.now()) {
+  return expectingReadings() && state.lastGoodPacketAt > 0 && now - state.lastGoodPacketAt > SIGNAL_STALE_MS;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Presentation modules
@@ -414,7 +433,13 @@ async function beginCalibration() {
     return;
   }
   clearRecheck();
-  state.calibration = { samples: [], goal: TIMING[state.source].calibrationSamples, source: state.source };
+  state.calibration = {
+    samples: [],
+    goal: TIMING[state.source].calibrationSamples,
+    source: state.source,
+    startedAt: Date.now(),
+    lastSampleAt: Date.now()
+  };
   setOperational(
     'CALIBRATING',
     'Building your baseline',
@@ -621,6 +646,7 @@ async function acknowledgeAlert() {
   clearInterval(state.alertTimer);
   alert.state = 'ACKNOWLEDGED';
   alert.acknowledgedAt = Date.now();
+  alert.suppressed = true;
   state.suppressed = true;
   persistQuietly(store.put('alerts', alert));
   alertCenter.close();
@@ -644,7 +670,7 @@ async function escalateAlert() {
     patientAlias: state.profile.patientAlias,
     accessSide: state.profile.accessSide,
     occurredAt: new Date(alert.createdAt).toISOString(),
-    mode: state.source,
+    mode: alert.mode ?? state.source,
     evidence: alert.evidence
   };
 
@@ -665,6 +691,7 @@ async function escalateAlert() {
   alert.state = 'ESCALATED';
   alert.escalatedAt = Date.now();
   alert.delivery = delivery;
+  alert.suppressed = true;
   state.suppressed = true;
   persistQuietly(store.put('alerts', alert));
 
@@ -712,6 +739,7 @@ function ingestPacket(packet, source) {
         bpm: packet.bpm,
         perfusionIndex: packet.perfusionIndex
       });
+      state.calibration.lastSampleAt = Date.now();
       renderCalibration();
       if (state.calibration.samples.length >= state.calibration.goal) finishCalibration();
     } else {
@@ -722,6 +750,9 @@ function ingestPacket(packet, source) {
   }
 
   if (!state.baseline) {
+    if (state.operational === 'SENSOR_ISSUE') {
+      setOperational('READY', 'Signal restored', 'Readings are arriving again. Calibrate to set a personal baseline.', 'good');
+    }
     renderAll();
     return;
   }
@@ -757,7 +788,9 @@ function ingestPacket(packet, source) {
       'VFM is watching it, not re-alerting. It re-arms once readings return to your personal range.',
       'watch'
     );
-  } else if (admissible && !['ACKNOWLEDGED', 'ESCALATED'].includes(state.operational)) {
+  } else if (admissible) {
+    // Includes recovery from ACKNOWLEDGED/ESCALATED: once readings are back in
+    // range the strip must stop claiming an alert is still outstanding.
     setOperational('MONITORING', 'Monitoring your flow pattern', 'Current readings are within your personal range.', 'good');
   }
 
@@ -765,14 +798,18 @@ function ingestPacket(packet, source) {
 }
 
 function renderAll() {
-  const latest = state.readings.at(-1) ?? null;
+  const stale = signalIsStale();
+  // While stale the readouts are hidden rather than left frozen on the last
+  // good value: a stale number looks exactly like a live one.
+  const latest = stale ? null : state.readings.at(-1) ?? null;
   const admissible = latest ? latest.quality >= QUALITY_MINIMUM && latest.contact && !latest.faulty : false;
 
   vitals.update({
     readings: state.readings,
     latest,
     baseline: state.baseline,
-    admissible
+    admissible,
+    stale
   });
 
   scope.setData(state.readings, state.baseline);
@@ -785,7 +822,9 @@ function renderAll() {
 
   if (!bpm) pulseRing.clear();
 
-  elements.scopeCaption.textContent = scopeDescription(latest);
+  elements.scopeCaption.textContent = stale
+    ? 'No admissible reading for 4 s — the trace is history, not live data.'
+    : scopeDescription(latest);
   elements.sourceBadge.textContent = state.source === 'demo' ? 'Demo replay' : state.connection === 'connected' ? 'Live band' : 'No band';
   elements.sourceBadge.dataset.tone = state.source === 'demo' ? 'info' : state.connection === 'connected' ? 'good' : 'neutral';
   elements.sessionBadge.textContent = `${state.readings.length} reading${state.readings.length === 1 ? '' : 's'} held`;
@@ -835,6 +874,9 @@ async function toggleConnection() {
 
     state.band = band;
     state.connection = 'connected';
+    // Start the staleness clock now: a band that connects but never notifies
+    // must go stale instead of leaving restored readings looking live.
+    state.lastGoodPacketAt = Date.now();
     if (state.calibration?.source === 'demo') {
       state.calibration = null;
       renderCalibration();
@@ -869,6 +911,12 @@ function handleDisconnect() {
   elements.connectBtn.querySelector('span').textContent = 'Connect band';
   elements.connectionPill.textContent = 'Band disconnected';
   elements.connectionPill.dataset.tone = 'watch';
+  // A calibration cannot continue without frames, and leaving it "active" used
+  // to wedge the card on "Calibrating…" with the start button disabled.
+  if (state.calibration) {
+    state.calibration = null;
+    addEvent('Calibration cancelled because the band disconnected.', 'watch');
+  }
   clearRecheck();
   if (!state.simulator) {
     setOperational('DISCONNECTED', 'Band disconnected', 'Reconnect to resume monitoring. Stored readings are kept.', 'watch');
@@ -879,6 +927,54 @@ function handleDisconnect() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Signal watchdog
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Runs once a second while a source is attached. Two jobs, both about honesty:
+ * never show a frozen reading as if it were live, and never build a baseline out
+ * of a stream that stopped producing admissible readings.
+ */
+function tickSignalState() {
+  // The recheck has its own drop-out handling, and an open acknowledgement
+  // dialog must keep its own status until the user resolves it.
+  if (state.recheck) return;
+  if (state.activeAlert?.state === 'PENDING_ACK') return;
+
+  if (state.calibration && Date.now() - state.calibration.lastSampleAt > CALIBRATION_TIMEOUT_MS) {
+    state.calibration = null;
+    setOperational(
+      'SENSOR_ISSUE',
+      'Calibration stopped',
+      'No usable reading arrived for 12 s, so no baseline was built from bad data. Reposition the band and start again.',
+      'watch'
+    );
+    addEvent('Calibration abandoned after 12 s without an admissible reading.', 'watch');
+    renderCalibration();
+    renderAll();
+    return;
+  }
+
+  if (state.calibration) return;
+
+  if (signalIsStale() && state.operational !== 'SENSOR_ISSUE') {
+    setOperational(
+      'SENSOR_ISSUE',
+      'No live signal',
+      'The band has not produced an admissible reading for 4 s. Last values are hidden rather than shown as current.',
+      'watch'
+    );
+    addEvent('No admissible reading for 4 s. The last values were marked stale instead of being shown as current.', 'watch');
+    renderAll();
+  }
+}
+
+function startSignalWatchdog() {
+  clearInterval(state.signalTimer);
+  state.signalTimer = setInterval(tickSignalState, 1000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Guided replay
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -886,6 +982,7 @@ async function startDemo(scenario) {
   stopDemo();
   state.calibration = null;
   state.source = 'demo';
+  state.lastGoodPacketAt = Date.now();
   // `tick` counts replay seconds; `establishedTick` counts only the seconds since
   // calibration completed. Scenario windows are expressed against the latter.
   state.demo = { scenario, tick: 0, establishedTick: 0 };
@@ -1042,6 +1139,9 @@ async function restore() {
     state.readings = readings.map(normaliseStoredReading).filter(Boolean).sort((a, b) => a.timestamp - b.timestamp).slice(-READING_LIMIT);
     state.events = events.sort((a, b) => b.timestamp - a.timestamp).slice(0, EVENT_LIMIT);
     state.activeAlert = alerts.sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+    // Acknowledging must not start an alert loop across a page reload: restore
+    // the suppression flag that lives with the alert record.
+    state.suppressed = state.activeAlert?.suppressed === true;
   } catch (error) {
     elements.storageNote.textContent = `Local storage unavailable: ${error.message}`;
     elements.storageNote.dataset.tone = 'watch';
@@ -1058,7 +1158,7 @@ async function restore() {
     if (state.activeAlert.dueAt <= Date.now()) {
       escalateAlert();
     } else {
-      state.activeAlert.total = TIMING[state.source].alertMs;
+      state.activeAlert.total = state.activeAlert.total ?? TIMING.live.alertMs;
       setOperational('ALERT_PENDING_ACK', 'A flow-pattern change persisted', 'A pending acknowledgement was restored.', 'alert');
       alertCenter.open(state.activeAlert);
       startAlertTimer();
@@ -1140,6 +1240,7 @@ if (scribbleStack && 'ResizeObserver' in window) {
 }
 
 startClock();
+startSignalWatchdog();
 restore();
 
 // Exposed for the console during a live demo; carries no behaviour of its own.

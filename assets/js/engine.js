@@ -23,7 +23,10 @@ export const MIN_TOLERANCE = 0.021;
 
 export const OPTICAL = {
   spo2: { warn: 94, alert: 90 },
-  perfusionIndex: { poorBelow: 4, fairBelow: 8 }
+  // Peak-to-peak perfusion index as reported by real pulse oximeters. At rest a
+  // well-seated sensor reads roughly 2-10 %; below 1 % the optical signal is too
+  // weak to trust, and 1-3 % is marginal. The demo generator uses the same scale.
+  perfusionIndex: { poorBelow: 1, fairBelow: 3 }
 };
 
 function median(values) {
@@ -110,7 +113,13 @@ export function classify(packet, ratio, baseline) {
 
   let lowPerfusion = false;
   if (Number.isFinite(packet.perfusionIndex)) {
-    lowPerfusion = packet.perfusionIndex < OPTICAL.perfusionIndex.fairBelow;
+    // Perfusion is judged against the person's own optical baseline when one
+    // exists, with an absolute floor for a signal too weak to trust at all.
+    // A fixed threshold alone would flag anyone whose normal PI is modest.
+    const piDelta = baseline.perfusionIndex == null ? null : percentDelta(packet.perfusionIndex, baseline.perfusionIndex);
+    lowPerfusion = piDelta == null
+      ? packet.perfusionIndex < OPTICAL.perfusionIndex.fairBelow
+      : piDelta <= -40 || packet.perfusionIndex < OPTICAL.perfusionIndex.poorBelow;
     if (lowPerfusion) reasons.push(`Perfusion index ${packet.perfusionIndex}% is weak`);
   }
 

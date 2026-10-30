@@ -15,7 +15,7 @@ import { QUALITY_MINIMUM } from './ble.js';
 const SPARK_SAMPLES = 24;
 // 135° sweep through vertical: the classic instrument-gauge arc, symmetric about
 // the top so the needle does not appear to hang off centre.
-const GAUGE = { width: 200, height: 120, start: Math.PI * 0.75, sweep: Math.PI * 1.5, radius: 72, valueMax: 25 };
+const GAUGE = { width: 200, height: 120, start: Math.PI * 0.75, sweep: Math.PI * 1.5, radius: 72, valueMax: 10 };
 
 function token(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim();

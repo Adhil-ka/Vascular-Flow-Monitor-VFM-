@@ -95,7 +95,7 @@ export function createVitals({ root, onInspect }) {
      * @param {object} snapshot.baseline  learned personal baseline
      * @param {boolean} snapshot.admissible whether the newest reading passed quality
      */
-    update({ readings = [], latest = null, baseline = null, admissible = false }) {
+    update({ readings = [], latest = null, baseline = null, admissible = false, stale = false }) {
       const chronological = readings;
 
       // ── Flow pattern ratio ────────────────────────────────────────────────
@@ -180,8 +180,10 @@ export function createVitals({ root, onInspect }) {
       const qualityCard = cards.quality;
       if (!latest || !Number.isFinite(latest.quality)) {
         odometers.quality.apply(null);
-        setChip(qualityCard, 'No signal', 'neutral');
-        qualityCard.context.textContent = 'Band not connected';
+        setChip(qualityCard, stale ? 'Stale' : 'No signal', stale ? 'watch' : 'neutral');
+        qualityCard.context.textContent = stale
+          ? 'No admissible reading for 4 s — values hidden rather than frozen'
+          : 'Band not connected';
         qualityCard.delta.textContent = '—';
         qualityCard.delta.dataset.tone = 'neutral';
       } else {

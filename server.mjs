@@ -99,6 +99,13 @@ function normalizeAlert(body) {
 async function serveStatic(req, res) {
   const rawPath = new URL(req.url, 'http://localhost').pathname;
   const relativePath = rawPath === '/' ? 'AVF.html' : decodeURIComponent(rawPath).replace(/^\/+/, '');
+  // Dotfiles and the audit directory are not part of the app. Without this the
+  // server hands out .git/ (full history) and .env (provider credentials) — and
+  // the documented cloudflared workflow puts it on a public URL.
+  const segments = relativePath.split(/[\\/]+/);
+  if (segments.some((part) => part.startsWith('.') || part === 'data')) {
+    return responseJson(res, 404, { error: 'Not found' });
+  }
   const target = normalize(join(rootDir, relativePath));
   if (!target.startsWith(`${rootDir}${sep}`) && target !== rootDir) return responseJson(res, 403, { error: 'Forbidden' });
   try {

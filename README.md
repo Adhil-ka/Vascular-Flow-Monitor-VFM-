@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <em>Hackathon prototype · Web Bluetooth · ESP32-compatible telemetry · Personalized baseline analysis</em>
+  <em>Hackathon prototype · Web Bluetooth · ESP32 band firmware included · Personalized baseline analysis</em>
 </p>
 
 > **Important:** VFM is a decision-support demonstration, not a medical device. It does not diagnose stenosis or thrombosis, replace clinical advice, contact emergency services, or make treatment decisions.
@@ -143,12 +143,19 @@ The demo mode is especially important for judging. It exercises the same validat
 
 ### 7.1 Wearable layer
 
-The intended prototype wearable is an ESP32-based device with:
+The reference ESP32 firmware ships in [`esp-firm/`](esp-firm/README.md). It samples a
+contact microphone at 4 kHz, runs a 1,024-point FFT on-device, reads a MAX30102 pulse
+oximeter, and streams one 22-byte v2 frame per second when the phone's MTU permits;
+otherwise it sends a 20-byte v1 fallback rather than truncating optical bytes:
 
-- A piezoelectric or contact vibration sensor positioned over the simulated access site.
-- A MAX30102-style optical pulse sensor for supporting pulse-wave features.
-- BLE advertising and notifications for telemetry.
-- Optional haptic feedback controlled by a BLE write characteristic.
+- A MAX4466-style electret/contact microphone on GPIO34 for acoustic features.
+- A MAX30102 / MAX30105 optical sensor on I²C for pulse rate, SpO₂ and perfusion.
+- BLE advertising and notifications for telemetry. The firmware tracks the
+  negotiated peer MTU and switches between the 22-byte v2 and 20-byte v1 frames.
+- Optional haptic feedback on GPIO4, driven by a BLE write characteristic. Haptic
+  capability is advertised only when the motor is configured as fitted.
+- An optional conductive contact pad on GPIO5, with acoustic fallback when the pad or
+  optical sensor is not fitted.
 
 The ESP32 is appropriate for a hackathon because it is inexpensive, widely available, and includes BLE. It is not presented as the final medical hardware design.
 
@@ -218,7 +225,7 @@ Telemetry is little-endian. Two frame revisions exist and **both are accepted**:
 | 17 | `u8` | Quality | Signal-quality score, 0-100 |
 | 18 | `u8` | BPM | Pulse estimate |
 | 19 | `u8` | Flags | Contact, PPG, fault, and haptic state |
-| 20 | `u8` | SpO₂ | **v2 only.** Peripheral oxygen saturation, percent |
+| 20 | `u8` | SpO₂ | **v2 only.** Uncalibrated saturation estimate, percent |
 | 21 | `u8` | Perfusion index | **v2 only.** Optical signal strength reaching the sensor, 0-100 |
 
 ### Why the frame is 22 bytes and not 21
@@ -243,8 +250,11 @@ explaining which of the three reasons applies:
 | `Out of range` | The value fell outside its plausibility bounds and was discarded |
 
 This is the honest cost of putting SpO₂ in the wire format rather than simulating
-it in the browser: **the column reads as unavailable until firmware ships v2
-frames.** The guided demo emits v2, so the column is fully populated on stage.
+it in the browser: **the column reads as unavailable until the band asserts
+`FLAG_PPG_VALID`.** The reference firmware sends v2 frames when the peer MTU permits
+and asserts the flag only when its optical validity gates pass; a 20-byte v1
+fallback intentionally omits optical fields. The guided demo emits v2, so the column
+is fully populated on stage.
 
 ### Flags
 
@@ -260,8 +270,11 @@ frames.** The guided demo emits v2, so the column is fully populated on stage.
 Control packets are two bytes:
 
 ```text
-[1, command]
+[2, command]
 ```
+
+The reference firmware also accepts a `1` in the first byte so older clients keep
+working; the command is always the second byte.
 
 | Command | Meaning |
 | --- | --- |
@@ -294,6 +307,29 @@ The telemetry also includes:
 - Signal quality.
 - Sensor-contact state.
 - Device-fault state.
+
+### Firmware signal chain
+
+The reference band does the signal processing on-device, so the browser receives
+features rather than raw audio (see [`esp-firm/README.md`](esp-firm/README.md)):
+
+- **Acoustic:** 4 kHz sampling → 256 ms Hann-windowed 1,024-point FFT → 50-200 Hz and
+  300-800 Hz band powers, a 900-1,800 Hz noise reference, and an interpolated
+  dominant peak. Quality combines spectral SNR, in-band concentration, and signal
+  level; clipping and a stuck ADC are penalised explicitly.
+- **Optical:** 50 Hz Red+IR FIFO → 6 s window → DC/AC separation → peak-to-peak
+  perfusion index, R-ratio SpO₂, and autocorrelation pulse rate. SpO₂ and perfusion
+  are asserted when the DC, AC and perfusion gates pass; heart rate is sent only when
+  autocorrelation confidence also passes, otherwise the browser resolves it to null.
+- **Perfusion judgment:** a weak absolute PI (below 1 %) is always flagged, but at
+  normal levels the app compares PI with the person's own optical baseline, so a
+  naturally modest perfusion is not treated as an anomaly.
+- **Cadence:** one frame per second, which is what the browser's 60-reading,
+  60-second recheck expects.
+
+Perfusion index uses the clinical peak-to-peak convention (`100 × AC pp / DC`), which
+is why the display bands put weak below 1 %, fair at 1-3 %, and strong at 3 % or more.
+The demo generator uses the same scale.
 
 ### Baseline
 
@@ -340,7 +376,7 @@ Use a closed-loop flow rig:
 - Small 5V water pump.
 - Water reservoir.
 - Contact acoustic sensor strapped to the tubing.
-- Optional ESP32 telemetry transmitter.
+- Optional ESP32 telemetry transmitter (reference firmware in `esp-firm/`).
 - Laptop for the local server.
 - Android phone running Chrome for Web Bluetooth.
 
@@ -471,6 +507,10 @@ http://127.0.0.1:3000
 The server serves `AVF.html` as the application entry point. There is no install
 step: the single third-party dependency is committed under `assets/vendor/`.
 
+> Open the URL above, not `AVF.html` directly. The health check and receipt API are
+> served by `server.mjs`; without it the footer correctly reports "Receipt service
+> unreachable" and alert delivery is recorded on this device only.
+
 ### Run the protocol tests
 
 ```bash
@@ -549,6 +589,9 @@ Never expose provider credentials in browser code or commit them to the reposito
 │   └── vendor/                  # Third-party code, committed — see vendor/README.md
 ├── server.mjs                   # Static server, health endpoint, alert audit API
 ├── test/packet.test.mjs         # Protocol unit tests
+├── esp-firm/
+│   ├── esp-firm.ino             # ESP32 acoustic FFT + MAX30102 telemetry firmware
+│   └── README.md                # Wiring, build, DSP/optical algorithms, troubleshooting
 ├── package.json                 # Node metadata and start/dev/test scripts
 └── data/alert-audit.ndjson      # Generated local audit output; not clinical data
 ```
@@ -556,7 +599,10 @@ Never expose provider credentials in browser code or commit them to the reposito
 There is no build step and no `npm install`. Native ES modules are served directly,
 and the single third-party dependency is committed under `assets/vendor/`.
 
-The physical ESP32 firmware is not included in this repository. The browser and server are designed around the BLE contract documented above so firmware can be developed and tested independently.
+The firmware is a standard Arduino sketch in `esp-firm/` and is built separately; it
+needs the ESP32 core and the SparkFun MAX3010x library. The browser and server remain
+usable on their own, because everything above the BLE contract is protocol-driven and
+the guided demo replays real v2 frames through the same decoder.
 
 ---
 
@@ -618,7 +664,8 @@ The server also applies basic safety controls such as JSON size limits, input no
 
 ### Phase 1 — Prototype reliability
 
-- Include and validate reference ESP32 firmware.
+- ~~Include and validate reference ESP32 firmware.~~ Reference firmware is included in
+  `esp-firm/`; hardware validation on a physical band is still pending.
 - Add deterministic telemetry replay tests.
 - Improve BLE reconnect behavior and packet-loss handling.
 - Add automated tests for baseline and recheck logic.

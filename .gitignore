@@ -1,2 +1,3 @@
 data/alert-audit.ndjson
 .env
+esp-firm/build/
