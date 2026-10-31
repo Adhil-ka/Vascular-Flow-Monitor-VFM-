@@ -145,10 +145,10 @@ static const uint16_t OPTICAL_WINDOW_SAMPLES = 300; // 6 seconds at 50 Hz
 static const uint16_t OPTICAL_MIN_PPG_SAMPLES = 250; // 5 seconds
 static const uint16_t OPTICAL_MIN_LAG = 14;          // ~214 bpm at 50 Hz
 static const uint16_t OPTICAL_MAX_LAG = 100;         // 30 bpm at 50 Hz
-static const float OPTICAL_DC_MIN = 5000.0f;         // dark / no finger below this
-static const float OPTICAL_AC_MIN = 1.0f;
-static const float OPTICAL_PI_MIN = 0.3f;
-static const float OPTICAL_CORRELATION_MIN = 0.35f;
+static const float OPTICAL_DC_MIN = 80000.0f;        // dark / no finger below this (raised to avoid ambient)
+static const float OPTICAL_AC_MIN = 2.0f;
+static const float OPTICAL_PI_MIN = 0.6f;
+static const float OPTICAL_CORRELATION_MIN = 0.45f;
 static const uint32_t OPTICAL_STALE_MS = 2000;
 static const uint8_t OPTICAL_NOT_AVAILABLE = 255;
 
@@ -179,6 +179,8 @@ volatile uint8_t requestedHapticCommand = 0;
 bool hapticActive = false;
 uint32_t hapticStartedMs = 0;
 uint16_t packetSequence = 0;
+bool opticalPpgStable = false;
+bool opticalPpgStablePrev = false;
 
 MAX30105 particleSensor;
 bool max30102Ready = false;
@@ -428,13 +430,13 @@ AcousticFeatures analyseAcousticWindow(float measuredSampleRateHz) {
 
   // The noise reference must exist for the SNR score to mean anything. At a
   // low measured sample rate the 900-1800 Hz band can disappear above Nyquist;
-  // an absent band would otherwise divide by 1e-20 and produce a huge SNR.
-  bool spectralBandsUsable = lowBins > 0 && highBins > 0 && noiseBins > 0;
+  // be more lenient - use total power as noise reference if needed
+  bool spectralBandsUsable = lowBins > 0 && highBins > 0; // allow missing noise band
 
   float signalPower = lowPower + highPower;
   float signalBins = (float)(lowBins + highBins);
   float signalPsd = signalBins > 0.0f ? signalPower / signalBins : 0.0f;
-  float noisePsd = noiseBins > 0 ? noisePower / (float)noiseBins : 0.0f;
+  float noisePsd = noiseBins > 0 ? noisePower / (float)noiseBins : (totalPower - signalPower > 0 && (maxBin - (lowBins+highBins)) > 0) ? (totalPower - signalPower) / (float)(maxBin - (lowBins+highBins)) : 1e-12f;
 
   features.snrDb = spectralBandsUsable
                        ? 10.0f * log10f(fmaxf(signalPsd, 1e-20f) / fmaxf(noisePsd, 1e-20f))
@@ -444,6 +446,9 @@ AcousticFeatures analyseAcousticWindow(float measuredSampleRateHz) {
   if (totalPower > 1e-12f) {
     features.lowBandPower = fmaxf(lowPower / totalPower, BAND_POWER_FLOOR);
     features.highBandPower = fmaxf(highPower / totalPower, BAND_POWER_FLOOR);
+  } else {
+    features.lowBandPower = BAND_POWER_FLOOR;
+    features.highBandPower = BAND_POWER_FLOOR;
   }
 
   // Dominant in-band peak. Search only the two diagnostic bands so an
@@ -491,10 +496,10 @@ AcousticFeatures analyseAcousticWindow(float measuredSampleRateHz) {
   float quality = 100.0f * (0.40f * snrScore + 0.30f * bandScore + 0.30f * levelScore);
 
   if (features.clippedSamples > FFT_SIZE / 100) quality *= 0.5f;
-  if (features.clippedSamples > FFT_SIZE / 10) quality = 0.0f;
-  if (features.adcStuck) quality = 0.0f;
-  if (rmsCounts < 0.5f) quality = 0.0f;
-  if (!spectralBandsUsable) quality = 0.0f;
+  if (features.clippedSamples > FFT_SIZE / 10) quality *= 0.3f;
+  if (features.adcStuck) quality *= 0.5f;
+  if (rmsCounts < 0.3f) quality *= 0.5f;
+  if (!spectralBandsUsable) quality *= 0.7f; // don't zero out completely
 
   features.quality = (uint8_t)clampf(lroundf(quality), 0, 100);
   return features;
@@ -634,6 +639,7 @@ void pushOpticalSample(uint32_t red, uint32_t ir) {
 void resetOpticalWindow() {
   opticalRing.head = 0;
   opticalRing.count = 0;
+  lastOpticalSampleMs = millis();
 }
 
 void pollOpticalFifo() {
@@ -759,6 +765,8 @@ OpticalFeatures analyseOpticalWindow() {
   // reporting old vitals forever.
   if (opticalRing.count > 0 && (millis() - lastOpticalSampleMs) > OPTICAL_STALE_MS) {
     resetOpticalWindow();
+    opticalPpgStable = false;
+    opticalPpgStablePrev = false;
   }
 
   if (opticalRing.count < OPTICAL_MIN_PPG_SAMPLES) return result;
@@ -812,13 +820,18 @@ OpticalFeatures analyseOpticalWindow() {
   bool heartRateOk = estimateHeartRate(opticalIrFiltered, count, OPTICAL_SAMPLE_RATE_HZ, bpm, confidence);
   result.correlation = confidence;
 
-  // SpO2 and perfusion are independently gated above. Keep them even when the
-  // autocorrelation cannot produce a trustworthy heart rate: the browser will
-  // resolve bpm=0 to null while still showing SpO2 and PI.
+  // Require a trustworthy heart rate for ppgValid to avoid noise passing gates
   result.spo2 = (uint8_t)lroundf(spo2);
   result.perfusionIndex = (uint8_t)clampf(lroundf(pi), 0, 100);
-  result.ppgValid = true;
-  if (heartRateOk) result.bpm = bpm;
+  if (heartRateOk) {
+    result.bpm = bpm;
+    result.ppgValid = true;
+  } else {
+    result.ppgValid = false;
+    result.bpm = 0;
+    result.spo2 = 0;
+    result.perfusionIndex = OPTICAL_NOT_AVAILABLE;
+  }
   return result;
 }
 
@@ -867,14 +880,49 @@ void sendTelemetry(const AcousticFeatures &acoustic, const OpticalFeatures &opti
   packet.amplitude = acoustic.amplitudeMillivolts;
   packet.dominantFrequencyHz = acoustic.dominantFrequencyHz;
   packet.quality = acoustic.quality;
-  packet.bpm = optical.ppgValid ? optical.bpm : 0;
-  packet.spo2 = optical.ppgValid ? optical.spo2 : 0;
-  packet.perfusionIndex = optical.ppgValid ? optical.perfusionIndex : OPTICAL_NOT_AVAILABLE;
+
+  // Frame-level hysteresis: require stable state
+  bool ppgOut = optical.ppgValid;
+  if (opticalPpgStablePrev && !optical.ppgValid) {
+    // If we were stable and just lost signal, be conservative - keep previous stable briefly
+    // but better to drop; use opticalPpgStablePrev state
+    ppgOut = false; // will be updated
+  } else if (!opticalPpgStablePrev && optical.ppgValid) {
+    ppgOut = true;
+  } else {
+    ppgOut = optical.ppgValid;
+  }
+  // Track stability
+  static bool lastPpgOut = false;
+  static uint8_t badCount = 0;
+  if (optical.ppgValid) {
+    badCount = 0;
+    lastPpgOut = true;
+    ppgOut = true;
+  } else {
+    if (lastPpgOut) {
+      badCount++;
+      if (badCount < 2) {
+        ppgOut = true; // debounce dropout
+      } else {
+        ppgOut = false;
+        lastPpgOut = false;
+      }
+    } else {
+      ppgOut = false;
+      badCount = 0;
+    }
+  }
+
+  packet.bpm = ppgOut ? optical.bpm : 0;
+  packet.spo2 = ppgOut ? optical.spo2 : 0;
+  packet.perfusionIndex = ppgOut ? optical.perfusionIndex : OPTICAL_NOT_AVAILABLE;
+  opticalPpgStablePrev = ppgOut;
 
   packet.flags = 0;
   if (HAPTIC_INSTALLED) packet.flags |= FLAG_HAPTIC;
   if (contact) packet.flags |= FLAG_CONTACT;
-  if (optical.ppgValid) packet.flags |= FLAG_PPG_VALID;
+  if (ppgOut) packet.flags |= FLAG_PPG_VALID;
   if (!dspSelfTestPassed || acoustic.adcStuck) packet.flags |= FLAG_FAULT;
 
   // Never put NaN or infinity on the wire; the browser expects real numbers.
@@ -910,6 +958,8 @@ void printDiagnostics(const AcousticFeatures &acoustic, const OpticalFeatures &o
       (unsigned)(optical.ppgValid ? optical.bpm : 0),
       (unsigned)(optical.ppgValid ? optical.spo2 : 0),
       (unsigned)(optical.ppgValid ? optical.perfusionIndex : OPTICAL_NOT_AVAILABLE));
+  Serial.printf("[DIAG] irDc=%.0f redDc=%.0f pi=%.2f corr=%.2f cnt=%u\n",
+                optical.irDc, optical.redDc, optical.pi, optical.correlation, (unsigned)optical.sampleCount);
 
   if (optical.ppgValid) {
     Serial.printf("[OPT] dcIR=%.0f dcRed=%.0f pi=%.2f corr=%.2f samples=%u\n",
@@ -972,7 +1022,11 @@ class ServerCallbacks : public BLEServerCallbacks {
     (void)server;
     deviceConnected = false;
     telemetryV2Enabled = false;
-    requestedHapticCommand = CONTROL_HAPTIC_STOP;
+    if (HAPTIC_INSTALLED) {
+      requestedHapticCommand = CONTROL_HAPTIC_STOP;
+    } else {
+      requestedHapticCommand = 0;
+    }
     Serial.println("[BLE] Client disconnected; restarting advertising.");
     BLEDevice::startAdvertising();
   }
@@ -1011,6 +1065,9 @@ void setup() {
   } else {
     pinMode(PIN_HAPTIC, INPUT);
   }
+  hapticActive = false;
+  hapticStartedMs = 0;
+  requestedHapticCommand = 0;
   pinMode(PIN_CONTACT, INPUT_PULLUP);
   pinMode(PIN_ACOUSTIC, INPUT);
 
@@ -1081,15 +1138,23 @@ void loop() {
     pollOpticalFifo();
     lastOpticalPollMs = now;
   }
+  // Also poll more frequently if we're close to frame time to avoid overflow
+  if (max30102Ready && (now - lastOpticalPollMs >= 50)) {
+    pollOpticalFifo();
+    lastOpticalPollMs = now;
+  }
 
   // One acoustic window and one telemetry frame per second. The cadence is
   // advanced from the previous frame boundary so the 256 ms capture does not
   // stretch it: the browser's 60 s recheck expects about 60 readings per minute.
   if (now - lastFrameMs >= FRAME_INTERVAL_MS) {
     lastFrameMs += FRAME_INTERVAL_MS;
-    if (now - lastFrameMs >= FRAME_INTERVAL_MS) {
+    if (now - lastFrameMs >= FRAME_INTERVAL_MS * 2) {
       // A whole interval was missed (serial stall, BLE hiccup). Resynchronise
       // rather than sending a burst of catch-up frames.
+      lastFrameMs = now;
+    } else if (now - lastFrameMs >= FRAME_INTERVAL_MS) {
+      // small drift, just resync
       lastFrameMs = now;
     }
 
