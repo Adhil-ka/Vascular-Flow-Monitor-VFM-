@@ -182,7 +182,7 @@ export function createVitals({ root, onInspect }) {
         odometers.quality.apply(null);
         setChip(qualityCard, stale ? 'Stale' : 'No signal', stale ? 'watch' : 'neutral');
         qualityCard.context.textContent = stale
-          ? 'No admissible reading for 4 s — values hidden rather than frozen'
+          ? 'No telemetry for 4 s — values hidden rather than frozen'
           : 'Band not connected';
         qualityCard.delta.textContent = '—';
         qualityCard.delta.dataset.tone = 'neutral';

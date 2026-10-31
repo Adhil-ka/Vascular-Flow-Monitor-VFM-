@@ -127,7 +127,14 @@ const state = {
   clockTimer: null,
   signalTimer: null,
   lastPacketAt: 0,
-  lastGoodPacketAt: 0
+  lastGoodPacketAt: 0,
+  lastStaleNoticeAt: 0,
+  /**
+   * The newest projected reading, whether or not it passed the quality floor.
+   * The Monitor shows what the band is actually sending; admissibility decides
+   * whether it is used as evidence, not whether it may be displayed at all.
+   */
+  lastSeenReading: null
 };
 
 /**
@@ -136,6 +143,8 @@ const state = {
  * the Monitor view, so anything older than this is presented as stale instead.
  */
 const SIGNAL_STALE_MS = 4000;
+/** A repeated outage must not append a duplicate audit event every second. */
+const STALE_EVENT_COOLDOWN_MS = 30_000;
 /** A calibration that stops producing admissible readings is abandoned. */
 const CALIBRATION_TIMEOUT_MS = 12_000;
 
@@ -145,7 +154,12 @@ function expectingReadings() {
 }
 
 function signalIsStale(now = Date.now()) {
-  return expectingReadings() && state.lastGoodPacketAt > 0 && now - state.lastGoodPacketAt > SIGNAL_STALE_MS;
+  if (!expectingReadings()) return false;
+  // Staleness means "no telemetry at all", not "the last frames failed the
+  // quality floor". Gating on admissible frames only made a marginal band
+  // blank the readouts every few seconds — the flashing "no signal" cycle.
+  const lastSeen = Math.max(state.lastPacketAt, state.lastGoodPacketAt);
+  return lastSeen > 0 && now - lastSeen > SIGNAL_STALE_MS;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -266,6 +280,12 @@ function setOperational(phase, label, detail, tone = null) {
 }
 
 async function addEvent(message, tone = 'system', detail = null) {
+  // Collapse an immediate repeat of the same message. A flapping band can
+  // otherwise append the identical audit row several times a second.
+  const newest = state.events[0];
+  if (newest && newest.message === message && newest.tone === tone && Date.now() - newest.timestamp < 5000) {
+    return;
+  }
   const event = { id: uid(), message, tone, detail, timestamp: Date.now() };
   state.events.unshift(event);
   state.events = state.events.slice(0, EVENT_LIMIT);
@@ -721,10 +741,15 @@ function ingestPacket(packet, source) {
   const admissible = isAdmissible(packet);
   const evidence = admissible && state.baseline ? classify(packet, packet.highBandPower / Math.max(packet.lowBandPower, 1e-6), state.baseline) : null;
 
+  // Project every frame, admissible or not, so the Monitor can show what the
+  // band is sending instead of blanking the readouts on a marginal frame.
+  const reading = toReading(packet, source, evidence, state.baseline);
+  reading.hapticAvailable = packet.hapticAvailable;
+  state.lastSeenReading = reading;
+
   if (admissible) {
     state.lastGoodPacketAt = Date.now();
-    const reading = toReading(packet, source, evidence, state.baseline);
-    reading.hapticAvailable = packet.hapticAvailable;
+    state.lastStaleNoticeAt = 0;
     state.readings.push(reading);
     if (state.readings.length > READING_LIMIT) state.readings = state.readings.slice(-READING_LIMIT);
     persistQuietly(store.add('readings', reading).then(() => store.pruneReadings()));
@@ -750,7 +775,10 @@ function ingestPacket(packet, source) {
   }
 
   if (!state.baseline) {
-    if (state.operational === 'SENSOR_ISSUE') {
+    // Only a genuinely admissible frame counts as recovery. Announcing
+    // "Signal restored" for a rejected frame made the watchdog fire again the
+    // next second, which is what produced one stale event per second.
+    if (admissible && state.operational === 'SENSOR_ISSUE') {
       setOperational('READY', 'Signal restored', 'Readings are arriving again. Calibrate to set a personal baseline.', 'good');
     }
     renderAll();
@@ -800,8 +828,11 @@ function ingestPacket(packet, source) {
 function renderAll() {
   const stale = signalIsStale();
   // While stale the readouts are hidden rather than left frozen on the last
-  // good value: a stale number looks exactly like a live one.
-  const latest = stale ? null : state.readings.at(-1) ?? null;
+  // good value: a stale number looks exactly like a live one. While frames are
+  // arriving, show the newest frame even if it is below the quality floor — the
+  // quality card carries the "below floor" verdict instead of blanking
+  // everything (which read as a flashing signal).
+  const latest = stale ? null : (state.lastSeenReading ?? state.readings.at(-1) ?? null);
   const admissible = latest ? latest.quality >= QUALITY_MINIMUM && latest.contact && !latest.faulty : false;
 
   vitals.update({
@@ -823,7 +854,7 @@ function renderAll() {
   if (!bpm) pulseRing.clear();
 
   elements.scopeCaption.textContent = stale
-    ? 'No admissible reading for 4 s — the trace is history, not live data.'
+    ? 'No telemetry for 4 s — the trace is history, not live data.'
     : scopeDescription(latest);
   elements.sourceBadge.textContent = state.source === 'demo' ? 'Demo replay' : state.connection === 'connected' ? 'Live band' : 'No band';
   elements.sourceBadge.dataset.tone = state.source === 'demo' ? 'info' : state.connection === 'connected' ? 'good' : 'neutral';
@@ -907,6 +938,8 @@ async function toggleConnection() {
 function handleDisconnect() {
   state.connection = 'disconnected';
   state.band = null;
+  // The newest live frame is no longer live once the band is gone.
+  state.lastSeenReading = null;
   elements.connectBtn.dataset.phase = '';
   elements.connectBtn.querySelector('span').textContent = 'Connect band';
   elements.connectionPill.textContent = 'Band disconnected';
@@ -961,11 +994,17 @@ function tickSignalState() {
     setOperational(
       'SENSOR_ISSUE',
       'No live signal',
-      'The band has not produced an admissible reading for 4 s. Last values are hidden rather than shown as current.',
+      'The band has not sent telemetry for 4 s. Last values are hidden rather than shown as current.',
       'watch'
     );
-    addEvent('No admissible reading for 4 s. The last values were marked stale instead of being shown as current.', 'watch');
     renderAll();
+  }
+
+  // Log an outage once, then at most once per cooldown, so a marginal band
+  // cannot fill the audit log with one identical row per second.
+  if (signalIsStale() && Date.now() - state.lastStaleNoticeAt > STALE_EVENT_COOLDOWN_MS) {
+    state.lastStaleNoticeAt = Date.now();
+    addEvent('No telemetry for 4 s. The last values were marked stale instead of being shown as current.', 'watch');
   }
 }
 

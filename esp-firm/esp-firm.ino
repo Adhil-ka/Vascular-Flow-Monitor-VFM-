@@ -145,10 +145,10 @@ static const uint16_t OPTICAL_WINDOW_SAMPLES = 300; // 6 seconds at 50 Hz
 static const uint16_t OPTICAL_MIN_PPG_SAMPLES = 250; // 5 seconds
 static const uint16_t OPTICAL_MIN_LAG = 14;          // ~214 bpm at 50 Hz
 static const uint16_t OPTICAL_MAX_LAG = 100;         // 30 bpm at 50 Hz
-static const float OPTICAL_DC_MIN = 80000.0f;        // dark / no finger below this (raised to avoid ambient)
-static const float OPTICAL_AC_MIN = 2.0f;
-static const float OPTICAL_PI_MIN = 0.6f;
-static const float OPTICAL_CORRELATION_MIN = 0.45f;
+static const float OPTICAL_DC_MIN = 50000.0f;         // dark / no finger below this
+static const float OPTICAL_AC_MIN = 1.5f;
+static const float OPTICAL_PI_MIN = 0.5f;
+static const float OPTICAL_CORRELATION_MIN = 0.40f;
 static const uint32_t OPTICAL_STALE_MS = 2000;
 static const uint8_t OPTICAL_NOT_AVAILABLE = 255;
 
@@ -923,7 +923,10 @@ void sendTelemetry(const AcousticFeatures &acoustic, const OpticalFeatures &opti
   if (HAPTIC_INSTALLED) packet.flags |= FLAG_HAPTIC;
   if (contact) packet.flags |= FLAG_CONTACT;
   if (ppgOut) packet.flags |= FLAG_PPG_VALID;
-  if (!dspSelfTestPassed || acoustic.adcStuck) packet.flags |= FLAG_FAULT;
+  // A stuck acoustic ADC is a degraded channel, not a dead device: it already
+  // drives quality to ~0. Only a failed DSP self-test is a hard fault, so a
+  // band with working optics is not rejected wholesale.
+  if (!dspSelfTestPassed) packet.flags |= FLAG_FAULT;
 
   // Never put NaN or infinity on the wire; the browser expects real numbers.
   if (!isfinite(packet.lowBandPower)) packet.lowBandPower = 0.0f;
